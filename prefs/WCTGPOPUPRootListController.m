@@ -1,26 +1,46 @@
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
-#import <notify.h>
+//
+//  设置面板控制器
+//
+//  注意：Preferences.framework 是设备上的「私有」框架，Xcode 的 iPhoneOS SDK 里没有，
+//  直接 -framework Preferences 会报 "framework not found"。
+//  这里改成自带最小声明 + 运行时动态查找（Settings app 里已经有这个框架）。
+//
+
+#import <UIKit/UIKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import "WCTGPConfig.h"
 
+// ---- 最小声明（不链接 Preferences.framework）----
+@interface PSSpecifier : NSObject
+- (NSMutableDictionary *)properties;
+@end
+
+@interface PSListController : UIViewController
+- (NSArray *)loadSpecifiersFromPlistName:(NSString *)name target:(id)target;
+- (void)reloadSpecifiers;
+- (void)reload;
+@end
+
 static NSString *const kWCTGDomain = @"com.wctg.popup";
-static const char *kWCTGDarwinNote = "com.wctg.popup/changed";
+static CFStringRef const kWCTGDarwinNote = CFSTR("com.wctg.popup/changed");
 
 @interface WCTGPOPUPRootListController : PSListController
 @end
 
-@implementation WCTGPOPUPRootListController
-
-- (NSArray *)specifiers {
-    if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
-    }
-    return _specifiers;
+@implementation WCTGPOPUPRootListController {
+    NSArray *_cachedSpecifiers;
 }
 
-// 读：直接读 com.wctg.popup 域
+- (NSArray *)specifiers {
+    if (!_cachedSpecifiers) {
+        _cachedSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+    }
+    return _cachedSpecifiers;
+}
+
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
-    NSString *key = [specifier properties][@"key"];
+    NSDictionary *props = [specifier properties];
+    NSString *key = props[@"key"];
     if (key.length == 0) {
         return nil;
     }
@@ -29,12 +49,12 @@ static const char *kWCTGDarwinNote = "com.wctg.popup/changed";
     if (v) {
         return (__bridge_transfer id)v;
     }
-    return [specifier properties][@"default"];
+    return props[@"default"];
 }
 
-// 写：写回同一域，并发 Darwin 通知让插件立刻热重载
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
-    NSString *key = [specifier properties][@"key"];
+    NSDictionary *props = [specifier properties];
+    NSString *key = props[@"key"];
     if (key.length == 0) {
         return;
     }
@@ -42,14 +62,19 @@ static const char *kWCTGDarwinNote = "com.wctg.popup/changed";
                              (__bridge CFTypeRef)value,
                              (__bridge CFStringRef)kWCTGDomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kWCTGDomain);
-    notify_post(kWCTGDarwinNote);
+
+    // Darwin 通知：插件侧用 CFNotificationCenterAddObserver 监听，改完立即生效
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         kWCTGDarwinNote, NULL, NULL, true);
 }
 
 - (void)resetDefaults:(PSSpecifier *)specifier {
     [WCTGPConfig resetToDefaults];
-    notify_post(kWCTGDarwinNote);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         kWCTGDarwinNote, NULL, NULL, true);
+    _cachedSpecifiers = nil;
     [self reloadSpecifiers];
-    // 给点反馈
+
     UINotificationFeedbackGenerator *g = [UINotificationFeedbackGenerator new];
     [g notificationOccurred:UINotificationFeedbackTypeSuccess];
 }

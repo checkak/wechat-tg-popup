@@ -24,9 +24,10 @@ BUNDLE_NAME = WCTGPOPUPPrefs
 
 WCTGPOPUPPrefs_FILES = prefs/WCTGPOPUPRootListController.m
 WCTGPOPUPPrefs_INSTALL_PATH = /Library/PreferenceBundles
-WCTGPOPUPPrefs_PRIVATE_FRAMEWORKS = Preferences
 WCTGPOPUPPrefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations \
                         -I$(THEOS_PROJECT_DIR)
+# PSListController 等符号由设置 App 在运行时提供
+WCTGPOPUPPrefs_LDFLAGS = -Wl,-undefined,dynamic_lookup
 WCTGPOPUPPrefs_RESOURCE_FILES = prefs/Root.plist
 
 include $(THEOS_MAKE_PATH)/bundle.mk
