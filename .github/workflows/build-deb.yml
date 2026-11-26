@@ -49,6 +49,13 @@ jobs:
           echo "$THEOS/bin" >> "$GITHUB_PATH"
           ls "$THEOS" | head -20
 
+      - name: 确认 layout 目录
+        run: |
+          pwd
+          find . -path ./.git -prune -o -type f -print | sort | head -40
+          echo "---"
+          ls -la layout/Library/MobileSubstrate/DynamicLibraries/ || echo "layout 缺失"
+
       - name: 编译 + 打包
         run: |
           set -o pipefail
