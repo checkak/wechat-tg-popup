@@ -4,7 +4,7 @@
 #import "WCTGPConfig.h"
 
 static NSString *const kWCTGDomain = @"com.wctg.popup";
-static NSString *const kWCTGDarwinNote = "com.wctg.popup/changed";
+static const char *kWCTGDarwinNote = "com.wctg.popup/changed";
 
 @interface WCTGPOPUPRootListController : PSListController
 @end
