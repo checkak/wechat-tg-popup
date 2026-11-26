@@ -1,0 +1,84 @@
+name: Build Tweak deb
+
+# 在 macOS runner 上用 Theos 交叉编译这个 dylib 插件，直接产出 .deb
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.xm"
+      - "*.m"
+      - "*.h"
+      - "Makefile"
+      - "control"
+      - "layout/**"
+      - ".github/workflows/**"
+
+jobs:
+  deb:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          sw_vers
+          which dpkg-deb || true
+
+      - name: 安装依赖（dpkg / ldid）
+        run: |
+          brew update >/dev/null || true
+          brew install dpkg || true
+          brew install ldid || true
+          which dpkg-deb
+          which ldid || echo "ldid 缺失（可用 ldid -S 跳过签名）"
+
+      - name: 克隆并配置 Theos
+        run: |
+          export THEOS="$RUNNER_TEMP/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          VER="$(xcrun --sdk iphoneos --show-sdk-version)"
+          ln -sfn "$SDK" "$THEOS/sdks/iPhoneOS${VER}.sdk"
+          ls -l "$THEOS/sdks"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          ls "$THEOS" | head -20
+
+      - name: 编译 + 打包
+        run: |
+          set -o pipefail
+          make clean || true
+          make package FINALPACKAGE=1 DEBUG=0 2>&1 | tee build.log
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
+      - name: 校验产物
+        run: |
+          ls -lh packages/ || true
+          DEB=$(ls packages/*.deb | head -1)
+          test -n "$DEB"
+          ar t "$DEB" || true
+          dpkg-deb -I "$DEB" || true
+          dpkg-deb -c "$DEB" || true
+          shasum -a 256 "$DEB" | tee deb.sha256
+
+      - name: 上传 deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: wctgpopup-deb
+          path: |
+            packages/*.deb
+            deb.sha256
+          if-no-files-found: error
+          retention-days: 30

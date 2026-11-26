@@ -1,0 +1,18 @@
+# 编译产物
+packages/
+.theos/
+obj/
+*.deb
+*.dylib
+build.log
+deb.sha256
+
+# 分析中间产物
+frames/
+*.py
+!check_balance.py
+__pycache__/
+
+# 系统
+.DS_Store
+Thumbs.db
