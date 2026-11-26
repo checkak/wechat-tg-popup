@@ -220,3 +220,54 @@ killall -9 WeChat
 }
 .card { animation: tgDrop .52s cubic-bezier(.22,1.2,.36,1) both; }
 ```
+
+---
+
+## 9. v1.1 变更（设置面板 + 稳定性）
+
+### 9.1 设置面板「弹窗动画」
+
+装好后：**设置 → 弹窗动画**（PreferenceLoader 入口，`label` 就叫「弹窗动画」）
+
+| 分组 | 条目 |
+|---|---|
+| 总开关 | 启用弹窗 / **免打扰会话不弹** / 正在聊天时也弹 / 触感反馈 / 群聊显示群名 |
+| 尺寸 | 卡片高度、左右留白、圆角、头像大小、距顶部 |
+| 入场动画（果冻） | 落下距离、起始缩放、动画时长、阻尼比、初速度、果冻压扁、果冻幅度 |
+| 停留与收起 | 停留时长、收起时长、收起上移 |
+| 关于 | 恢复默认设置 |
+
+实现要点：
+- 面板是 `PSListController`，但**不链接 `Preferences.framework`**（Xcode SDK 里没有这个私有框架），
+  改为自带最小声明 + `-Wl,-undefined,dynamic_lookup`，由设置 App 在运行时提供符号。
+- 读写统一走 `CFPreferences` 域 `com.wctg.popup`；
+- 每次改动 `CFNotificationCenterPostNotification(Darwin, "com.wctg.popup/changed")`，
+  插件侧监听同一通知 → **立刻热重载，不用重启微信**。
+
+### 9.2 闪退修复（这是 v1.0 的真凶）
+
+| 原因 | 说明 | 修法 |
+|---|---|---|
+| **私有 getter 签名不符** | v1.0 用 `respondsToSelector:` 后直接 `id(*)(id,SEL)` 调用。`content`/`chatName`/`messageType` 这类通用名在微信里可能是**带参方法**或**返回结构体**，零参调用 = 野指针 → 用一阵就闪退 | 改成 `class_getInstanceMethod` + `method_getNumberOfArguments == 2` + `method_getReturnType` 白名单（对象 `@` / 整型 `iIqQBsScC`）才调用 |
+| **KVC 探测** | `valueForKey:` 在微信某些类上会抛 `NSUnknownKeyException` 或触发自定义实现 | 彻底不用 KVC，全部走上面的签名安全取值 |
+| **`dispatch_once` 重入死锁** | `WCTGPopupCenter -init` 里注册通知时调用了 `[WCTGPopupCenter shared]`，重入 once 块 → 启动即卡死 | 回调里改用 `__weak self` |
+| **后台建窗口** | 微信在后台时创建 `UIWindow` 在部分系统上会崩 | `applicationState != Active` 直接返回 |
+| **双 hook 双弹** | `CMessageMgr` 与 `MessageMgr` 可能对同一条消息各触发一次 | 200ms 节流 + `msgId` 去重 |
+| **窗口残留** | 弹窗停留在系统 UI（来电/通知中心）之上 | 监听 `UIApplicationWillResignActiveNotification` 立即收起 |
+
+另外所有 hook 与 `handleWrap:` 都包了 `@try`，异常只丢当前这一条消息，不影响微信。
+
+### 9.3 免打扰不弹
+
+依据 `CContact` 的 `m_uiDisturbTime`（免打扰到期时间戳）：
+
+```objc
+long long disturb = WCTGInteger(contact, @"m_uiDisturbTime");
+if (disturb > 1e9)  return disturb > now;   // 绝对时间戳，未过期=静音中
+if (disturb > 0)    return YES;             // 少数版本写剩余秒数
+```
+
+旧版本兼容字段：`m_bDisturb` / `m_bMute`。
+开关在面板里叫「免打扰会话不弹」，默认 **开**。
+
+日志里会打印 `skip muted chat <wxid>`，方便你确认生效。

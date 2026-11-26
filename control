@@ -1,10 +1,11 @@
 Package: com.wctg.popup
 Name: 微信 TG 风格消息弹窗
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm64
-Description: 把 Telegram 那种「果冻下落」的消息横幅搬到微信里。来消息时从顶部弹簧落下，
- 轻度过冲后回弹稳定，3.6 秒后向上收走；点击横幅尽力跳转到对应聊天。
- 参数全部可在运行时通过 plist 覆盖，无需重编译。
+Description: 把 Telegram 的「果冻下落」消息横幅搬进微信。
+ · 设置 → 弹窗动画：20+ 参数可视化调节，改完立即生效
+ · 免打扰会话默认不弹（可关）
+ · v1.1 修复：运行时签名校验（防野指针闪退）、仅前台弹、节流、失活自动收起
 Maintainer: local
 Author: local
 Section: Tweaks
