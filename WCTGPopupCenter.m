@@ -1,4 +1,4 @@
-﻿#import "WCTGPopupCenter.h"
+#import "WCTGPopupCenter.h"
 #import "WCTGPopupView.h"
 #import "WCTGPConfig.h"
 

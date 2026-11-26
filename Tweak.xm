@@ -1,4 +1,4 @@
-﻿//
+//
 //  Tweak.xm
 //  WeChat TG 风格消息弹窗
 //
@@ -27,8 +27,7 @@ static id WCTGValue(id obj, NSArray<NSString *> *keys) {
         @try {
             SEL sel = NSSelectorFromString(k);
             if ([obj respondsToSelector:sel]) {
-                IMP imp = [obj methodForSelector:sel];
-                id (*fn)(id, SEL) = (void *)imp;
+                id (*fn)(id, SEL) = (id (*)(id, SEL))[obj methodForSelector:sel];
                 id v = fn(obj, sel);
                 if (v && v != [NSNull null]) return v;
             }
