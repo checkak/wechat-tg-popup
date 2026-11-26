@@ -2,10 +2,15 @@
 //  Tweak.xm
 //  WeChat TG 风格消息弹窗
 //
-//  设计原则：
-//   1) 只读不改：不拦截、不吞消息，仅「旁听」并在独立 UIWindow 上叠一层卡片
-//   2) 所有私有类/方法都用运行时探测 + @try 兜底，微信版本差异不会崩
-//   3) 失败静默：拿不到字段就不弹，绝不打断正常收发
+//  闪退防护（v1.1 重点）：
+//   1) 私有字段一律「校验方法签名」再调用：
+//        · 只接受 0 参方法（method_getNumberOfArguments == 2）
+//        · 只接受返回对象 '@' 或整型 'i/q/I/Q/B/c/s'
+//      以前 respondsToSelector: 之后就按 id(*)(id,SEL) 调，遇到同名带参方法
+//      或返回结构体的方法会直接野指针 → 用一阵就闪退。
+//   2) 完全不用 KVC valueForKey:（微信部分类改写了它，可能抛/崩）
+//   3) 整条处理链包 @try，任何异常只丢这一条消息，不影响微信
+//   4) 只在前台弹；窗口/视图全部在主线程
 //
 
 #import <UIKit/UIKit.h>
@@ -15,38 +20,60 @@
 
 #define WCTGLog(fmt, ...) NSLog(@"[WCTGPOPUP] " fmt, ##__VA_ARGS__)
 
-#pragma mark - 安全取值
+#pragma mark - 签名安全的取值
 
-static id WCTGValue(id obj, NSArray<NSString *> *keys) {
-    if (!obj) return nil;
-    for (NSString *k in keys) {
-        @try {
-            id v = [obj valueForKey:k];
-            if (v && v != [NSNull null]) return v;
-        } @catch (__unused NSException *e) {}
-        @try {
-            SEL sel = NSSelectorFromString(k);
-            if ([obj respondsToSelector:sel]) {
-                id (*fn)(id, SEL) = (id (*)(id, SEL))[obj methodForSelector:sel];
-                id v = fn(obj, sel);
-                if (v && v != [NSNull null]) return v;
-            }
-        } @catch (__unused NSException *e) {}
+/// 只调用「零参、返回对象」的方法
+static id WCTGObject(id obj, NSString *selName) {
+    if (!obj || selName.length == 0) return nil;
+    @try {
+        Class cls = object_getClass(obj);
+        if (!cls) return nil;
+        SEL sel = NSSelectorFromString(selName);
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) return nil;
+        if (method_getNumberOfArguments(m) != 2) return nil;   // 必须是 (self, _cmd)
+
+        char ret[8] = {0};
+        method_getReturnType(m, ret, sizeof(ret));
+        if (ret[0] != '@') return nil;                        // 只接受对象返回
+
+        IMP imp = method_getImplementation(m);
+        return ((id (*)(id, SEL))imp)(obj, sel);
+    } @catch (__unused NSException *e) {
+        return nil;
     }
-    return nil;
+}
+
+/// 只调用「零参、返回整型」的方法（bool / int / long 等）
+static long long WCTGInteger(id obj, NSString *selName) {
+    if (!obj || selName.length == 0) return 0;
+    @try {
+        Class cls = object_getClass(obj);
+        if (!cls) return 0;
+        SEL sel = NSSelectorFromString(selName);
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) return 0;
+        if (method_getNumberOfArguments(m) != 2) return 0;
+
+        char ret[8] = {0};
+        method_getReturnType(m, ret, sizeof(ret));
+        if (strchr("iIqQBsScC", ret[0]) == NULL) return 0;    // 只接受整型返回
+
+        IMP imp = method_getImplementation(m);
+        return ((long long (*)(id, SEL))imp)(obj, sel);
+    } @catch (__unused NSException *e) {
+        return 0;
+    }
 }
 
 static NSString *WCTGString(id obj, NSArray<NSString *> *keys) {
-    id v = WCTGValue(obj, keys);
-    if ([v isKindOfClass:[NSString class]]) return v;
-    if ([v respondsToSelector:@selector(stringValue)]) return [v stringValue];
+    for (NSString *k in keys) {
+        id v = WCTGObject(obj, k);
+        if ([v isKindOfClass:[NSString class]] && [v length] > 0) {
+            return v;
+        }
+    }
     return nil;
-}
-
-static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) {
-    id v = WCTGValue(obj, keys);
-    if ([v respondsToSelector:@selector(integerValue)]) return [v integerValue];
-    return fallback;
 }
 
 #pragma mark - 桥接
@@ -91,7 +118,8 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
 
         SEL byName = NSSelectorFromString(@"getContactByName:");
         if ([mgr respondsToSelector:byName]) {
-            return ((id (*)(id, SEL, id))[mgr methodForSelector:byName])(mgr, byName, usr);
+            id c = ((id (*)(id, SEL, id))[mgr methodForSelector:byName])(mgr, byName, usr);
+            return c;
         }
     } @catch (__unused NSException *e) {}
     return nil;
@@ -99,10 +127,8 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
 
 - (NSString *)displayNameForUsr:(NSString *)usr {
     id contact = [self contactForUsr:usr];
-    if (contact) {
-        NSString *n = WCTGString(contact, @[ @"m_nsNickName", @"m_nsRemark", @"nickName" ]);
-        if (n.length) return n;
-    }
+    NSString *n = contact ? WCTGString(contact, @[ @"m_nsNickName", @"m_nsRemark" ]) : nil;
+    if (n.length) return n;
     if (usr.length > 10) return [usr substringFromIndex:usr.length - 6];
     return usr.length ? usr : @"微信";
 }
@@ -114,7 +140,7 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
     NSString *u = WCTGString(contact, @[ @"m_nsHeadImgUrl", @"m_nsHeadImgUrlBig" ]);
     if (u.length) return u;
 
-    BOOL isGroup = WCTGInt(contact, @[ @"m_uiChatRoomStatus" ], 0) != 0;
+    BOOL isGroup = WCTGInteger(contact, @"m_uiChatRoomStatus") != 0;
     @try {
         if (isGroup) {
             SEL s = NSSelectorFromString(@"getChatRoomHeadImgUrl");
@@ -133,8 +159,36 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
     return nil;
 }
 
+#pragma mark 免打扰
+
+/// 判断某个会话是否「消息免打扰」
+/// 依据 CContact 的 m_uiDisturbTime（到期时间戳）。
+/// 同时兼容部分版本把剩余秒数写在这里的情况。
+- (BOOL)isChatMuted:(NSString *)chatUsr {
+    id contact = [self contactForUsr:chatUsr];
+    if (!contact) return NO;
+
+    long long disturb = WCTGInteger(contact, @"m_uiDisturbTime");
+    if (disturb > 0) {
+        long long now = (long long)[[NSDate date] timeIntervalSince1970];
+        if (disturb > 1000000000LL) {
+            return disturb > now;                   // 绝对时间戳
+        }
+        return YES;                                 // 剩余秒数（>0 即静音中）
+    }
+
+    // 少数版本用布尔字段
+    if (WCTGInteger(contact, @"m_bDisturb") == 1) return YES;
+    if (WCTGInteger(contact, @"m_bMute") == 1) return YES;
+    return NO;
+}
+
+#pragma mark 其它
+
 - (NSString *)previewForWrap:(id)wrap content:(NSString *)content {
-    NSInteger type = WCTGInt(wrap, @[ @"m_uiMessageType", @"messageType" ], 1);
+    long long type = WCTGInteger(wrap, @"m_uiMessageType");
+    if (type == 0) type = WCTGInteger(wrap, @"messageType");
+
     switch (type) {
         case 1:     return content.length ? content : @"[消息]";
         case 3:     return @"[图片]";
@@ -168,7 +222,7 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
         if ([vc isKindOfClass:[UITabBarController class]]) {
             vc = ((UITabBarController *)vc).selectedViewController;
         }
-        return WCTGString(vc, @[ @"m_chatName", @"chatName", @"m_nsChatName", @"m_usrName" ]);
+        return WCTGString(vc, @[ @"m_chatName", @"m_nsChatName" ]);
     } @catch (__unused NSException *e) {}
     return nil;
 }
@@ -184,8 +238,7 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
                 target = ((id (*)(id, SEL))[logic methodForSelector:sharedSel])(logic, sharedSel);
             }
         }
-        NSArray<NSString *> *candidates = @[ @"openChatByName:", @"OpenChat:", @"startChatWithUsr:" ];
-        for (NSString *name in candidates) {
+        for (NSString *name in @[ @"openChatByName:", @"OpenChat:", @"startChatWithUsr:" ]) {
             SEL sel = NSSelectorFromString(name);
             if (target && [target respondsToSelector:sel]) {
                 ((void (*)(id, SEL, id))[target methodForSelector:sel])(target, sel, usr);
@@ -201,60 +254,70 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
     } @catch (__unused NSException *e) {}
 }
 
+#pragma mark 入口
+
 - (void)handleWrap:(id)wrap {
     WCTGPConfig *cfg = [WCTGPConfig shared];
     if (!cfg.enabled || !wrap) return;
 
-    @autoreleasepool {
-        NSString *from = WCTGString(wrap, @[ @"m_nsFromUsr", @"fromUsr" ]);
-        NSString *to = WCTGString(wrap, @[ @"m_nsToUsr", @"toUsr" ]);
-        NSString *content = WCTGString(wrap, @[ @"m_nsContent", @"m_nsPushContent", @"content" ]);
-        NSString *chatUsr = WCTGString(wrap, @[ @"m_nsRealChatUsr", @"chatUsr" ]) ?: from;
-        NSString *msgId = WCTGString(wrap, @[ @"m_nsMsgId", @"msgId" ]);
-        NSInteger localId = WCTGInt(wrap, @[ @"m_uiMesLocalID", @"localId" ], 0);
-        NSInteger type = WCTGInt(wrap, @[ @"m_uiMessageType", @"messageType" ], 1);
+    @try {
+        @autoreleasepool {
+            NSString *from = WCTGString(wrap, @[ @"m_nsFromUsr" ]);
+            NSString *to = WCTGString(wrap, @[ @"m_nsToUsr" ]);
+            NSString *content = WCTGString(wrap, @[ @"m_nsContent", @"m_nsPushContent" ]);
+            NSString *chatUsr = WCTGString(wrap, @[ @"m_nsRealChatUsr" ]) ?: from;
+            NSString *msgId = WCTGString(wrap, @[ @"m_nsMsgId" ]);
+            long long localId = WCTGInteger(wrap, @"m_uiMesLocalID");
+            long long type = WCTGInteger(wrap, @"m_uiMessageType");
 
-        if (type == 10000) return;                       // 系统消息不弹
-        if (to.length && from.length && [to isEqualToString:from]) return;
+            if (type == 10000) return;                            // 系统消息
+            if (to.length && from.length && [to isEqualToString:from]) return;   // 自己发的
 
-        if (!cfg.showWhenInChat) {
-            NSString *cur = [self currentChatName];
-            if (cur.length && chatUsr.length && [cur isEqualToString:chatUsr]) return;
+            // ★ 免打扰会话不弹
+            if (cfg.mutedSuppress && [self isChatMuted:chatUsr]) {
+                WCTGLog(@"skip muted chat %@", chatUsr);
+                return;
+            }
+
+            if (!cfg.showWhenInChat) {
+                NSString *cur = [self currentChatName];
+                if (cur.length && chatUsr.length && [cur isEqualToString:chatUsr]) return;
+            }
+
+            NSString *preview = [self previewForWrap:wrap content:content];
+            if (preview.length > 200) {
+                preview = [[preview substringToIndex:200] stringByAppendingString:@"…"];
+            }
+
+            BOOL isGroup = (chatUsr.length && from.length && ![chatUsr isEqualToString:from]);
+            NSString *title;
+            if (isGroup) {
+                NSString *groupName = [self displayNameForUsr:chatUsr];
+                NSString *senderName = [self displayNameForUsr:from];
+                title = cfg.showGroupName
+                    ? [NSString stringWithFormat:@"%@ · %@", groupName, senderName]
+                    : groupName;
+            } else {
+                title = [self displayNameForUsr:from];
+            }
+
+            NSString *avatar = [self avatarURLForUsr:chatUsr ?: from];
+            NSString *key = msgId.length ? msgId
+                : (localId ? [NSString stringWithFormat:@"L%lld", localId] : nil);
+            NSString *tapUsr = (chatUsr ?: from) ?: @"";
+
+            WCTGLog(@"show title=%@ body=%@ key=%@", title, preview, key);
+            [[WCTGPopupCenter shared] showWithTitle:title
+                                               body:preview
+                                          avatarURL:avatar
+                                               seed:(chatUsr ?: from)
+                                          dedupeKey:key
+                                         tapHandler:^{
+                [[WCTGHookBridge shared] openChatWithUsr:tapUsr];
+            }];
         }
-
-        NSString *preview = [self previewForWrap:wrap content:content];
-        if (preview.length > 200) {
-            preview = [[preview substringToIndex:200] stringByAppendingString:@"…"];
-        }
-
-        BOOL isGroup = (chatUsr.length && from.length && ![chatUsr isEqualToString:from]);
-        NSString *title;
-        if (isGroup) {
-            NSString *groupName = [self displayNameForUsr:chatUsr];
-            NSString *senderName = [self displayNameForUsr:from];
-            title = cfg.showGroupName
-                ? [NSString stringWithFormat:@"%@ · %@", groupName, senderName]
-                : groupName;
-        } else {
-            title = [self displayNameForUsr:from];
-        }
-
-        NSString *avatar = [self avatarURLForUsr:chatUsr ?: from];
-        NSString *key = msgId.length
-            ? msgId
-            : (localId ? [NSString stringWithFormat:@"L%ld", (long)localId] : nil);
-
-        NSString *tapUsr = (chatUsr ?: from) ?: @""; 
-        WCTGLog(@"show title=%@ body=%@ key=%@", title, preview, key);
-
-        [[WCTGPopupCenter shared] showWithTitle:title
-                                           body:preview
-                                      avatarURL:avatar
-                                           seed:(chatUsr ?: from)
-                                      dedupeKey:key
-                                     tapHandler:^{
-            [[WCTGHookBridge shared] openChatWithUsr:tapUsr];
-        }];
+    } @catch (NSException *e) {
+        WCTGLog(@"handleWrap exception: %@", e.reason);
     }
 }
 
@@ -262,35 +325,45 @@ static NSInteger WCTGInt(id obj, NSArray<NSString *> *keys, NSInteger fallback) 
 
 #pragma mark - Hooks
 
-// 1) 微信最主要的收消息入口
 %hook CMessageMgr
 - (void)AsyncOnAddMsg:(id)msg MsgWrap:(id)wrap {
     %orig;
-    [[WCTGHookBridge shared] handleWrap:wrap];
+    @try {
+        [[WCTGHookBridge shared] handleWrap:wrap];
+    } @catch (NSException *e) {
+        WCTGLog(@"hook CMessageMgr exception: %@", e.reason);
+    }
 }
 - (void)onNewSyncAddMessage:(id)msg {
     %orig;
-    [[WCTGHookBridge shared] handleWrap:msg];
+    @try {
+        [[WCTGHookBridge shared] handleWrap:msg];
+    } @catch (NSException *e) {
+        WCTGLog(@"hook sync exception: %@", e.reason);
+    }
 }
 %end
 
-// 2) 有的版本类名没有 C 前缀
 %hook MessageMgr
 - (void)AsyncOnAddMsg:(id)msg MsgWrap:(id)wrap {
     %orig;
-    [[WCTGHookBridge shared] handleWrap:wrap];
+    @try {
+        [[WCTGHookBridge shared] handleWrap:wrap];
+    } @catch (NSException *e) {
+        WCTGLog(@"hook MessageMgr exception: %@", e.reason);
+    }
 }
 %end
 
 %ctor {
     @autoreleasepool {
         [[WCTGPConfig shared] reload];
-        WCTGLog(@"loaded, enabled=%d damping=%.2f duration=%.2f",
+        WCTGLog(@"loaded enabled=%d mutedSuppress=%d damping=%.2f duration=%.2f",
                (int)[WCTGPConfig shared].enabled,
+               (int)[WCTGPConfig shared].mutedSuppress,
                [WCTGPConfig shared].enterDamping,
                [WCTGPConfig shared].enterDuration);
 
-        // 回到前台时热重载配置（改 plist 后不用重启微信）
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil

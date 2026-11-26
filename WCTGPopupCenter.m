@@ -23,6 +23,7 @@
 @property (nonatomic, strong) NSTimer *holdTimer;
 @property (nonatomic, strong) NSMutableSet<NSString *> *recentKeys;
 @property (nonatomic, copy) void (^pendingTap)(void);
+@property (nonatomic, assign) NSTimeInterval lastShowTime;
 @end
 
 @implementation WCTGPopupCenter
@@ -37,6 +38,15 @@
 - (instancetype)init {
     if ((self = [super init])) {
         _recentKeys = [NSMutableSet set];
+        // 注意：这里不能用 [WCTGPopupCenter shared]，会重入 dispatch_once 造成死锁
+        __weak typeof(self) weakSelf = self;
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationWillResignActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *n) {
+            [weakSelf dismiss];
+        }];
     }
     return self;
 }
@@ -73,6 +83,17 @@
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 只在前台弹（后台创建 UIWindow 在部分系统上会崩）
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+            return;
+        }
+        // 两个 hook 可能对同一条消息各触发一次，200ms 内只认第一条
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        if (now - self.lastShowTime < 0.2 && !(self.card && self.card.superview)) {
+            return;
+        }
+        self.lastShowTime = now;
+
         self.pendingTap = tapHandler;
 
         // 已有卡片在显示：原地换内容并「再落一次」，对应视频里连续消息的连击感

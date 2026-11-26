@@ -97,6 +97,38 @@ make clean && make
 make install                     # 需配置 THEOS_DEVICE_IP / THEOS_DEVICE_PORT
 ```
 
+### 已经在 CI 上编好了 ✅
+
+本仓库带 `.github/workflows/build-deb.yml`，跑在 macOS-15 runner 上（Theos + Xcode 的 iPhoneOS SDK）：
+
+```
+https://github.com/checkak/wechat-tg-popup/actions
+```
+
+最近一次成功构建的产物：
+
+```
+com.wctg.popup_1.0.0_iphoneos-arm64.deb   27,048 bytes
+sha256  edf2b870330f3bc1a1ac7a1ea8ccaa40fe3b8e2714a3e27cf184b63e7c6eafb1
+```
+
+包内结构（实测）：
+
+```
+./Library/MobileSubstrate/DynamicLibraries/WCTGPOPUP.dylib    755 root:root  239,152 B
+./Library/MobileSubstrate/DynamicLibraries/WCTGPOPUP.plist    644 root:root       87 B
+```
+
+dylib 是 **FAT 双架构**（`arm64` + `arm64e`，每个 slice 108,080 B），里面能查到 `[WCTGPOPUP]` 日志前缀与 `wctg.squash` 动画键 —— 说明代码确实编进去了。
+
+### CI 上踩过的 3 个坑（都已修）
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| `Tweak.xm:1:1: unexpected character <U+FEFF>` | Windows 下 `Set-Content -Encoding UTF8` 会写 BOM，Logos 预处理器不认 | 全仓去 BOM、统一 LF（`normalize.py`） |
+| `You are missing a filter property list` | 这个 Theos 版本的 `__exists` 只看 `$(CURDIR)`，不递归 `layout/` | 把 `WCTGPOPUP.plist` 放**工程根目录**（Theos 会自动拷进 DynamicLibraries） |
+| 包根多出 `./Filter.plist`、属主是 `501:20` | `layout/` 里的副本被合并；macOS 的 `dpkg-deb` 用当前用户打包 | 删掉 `layout/`；用 `dpkg-deb --root-owner-group -Zxz` 重打包 |
+
 ---
 
 ## 5. 安装
