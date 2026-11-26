@@ -62,6 +62,18 @@ jobs:
           make clean || true
           make package FINALPACKAGE=1 DEBUG=0 2>&1 | tee build.log
 
+      - name: 规范化打包（root:root + xz）
+        run: |
+          set -e
+          DEB=$(ls packages/*.deb | head -1)
+          echo "Theos 产物: $DEB"
+          ls -la .theos/_/Library/MobileSubstrate/DynamicLibraries/ || true
+          if [ -d .theos/_ ]; then
+            dpkg-deb --root-owner-group -Zxz -b .theos/_ packages/wctg.popup.rooted.deb
+            mv -f packages/wctg.popup.rooted.deb "$DEB"
+            echo "已用 --root-owner-group 重打包"
+          fi
+
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
